@@ -1,7 +1,7 @@
 import unittest
 from array import array
 
-from app import live_audio_snapshot
+from app import live_audio_snapshot, pulse_capture_sources
 
 
 class LiveAudioSnapshotTests(unittest.TestCase):
@@ -22,6 +22,11 @@ class LiveAudioSnapshotTests(unittest.TestCase):
 
         self.assertEqual(snapshot["levels"], [0.0] * 6)
         self.assertTrue(snapshot["direction"]["uncertain"])
+
+    def test_finds_the_respeaker_pulse_source(self):
+        sources = "0\talsa_output.platform-bcm2835_audio.analog-stereo.monitor\n2\talsa_input.platform-soc_sound.multichannel-input\n"
+
+        self.assertEqual(pulse_capture_sources(sources), ["2"])
 
 
 if __name__ == "__main__":

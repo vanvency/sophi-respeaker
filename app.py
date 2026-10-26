@@ -71,6 +71,24 @@ def live_audio_snapshot(pcm, channels=8):
     return {"levels": levels, "direction": direction}
 
 
+def pulse_capture_sources(source_list):
+    """Return PulseAudio source indexes that own the ReSpeaker multichannel input."""
+    return [line.split("\t", 1)[0] for line in source_list.splitlines()
+            if "platform-soc_sound.multichannel-input" in line]
+
+
+def release_capture_device():
+    """Suspend PulseAudio's ReSpeaker input so ALSA can own the hardware stream."""
+    try:
+        listing = subprocess.run(["pactl", "list", "short", "sources"], text=True,
+                                 capture_output=True, timeout=3, check=True)
+        for source in pulse_capture_sources(listing.stdout):
+            subprocess.run(["pactl", "suspend-source", source, "1"], text=True,
+                           capture_output=True, timeout=3, check=False)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def wav_direction(wav_path):
     """Estimate direction from decimated RMS samples of channels 1–6 in an S32 WAV."""
     with wave.open(str(wav_path), "rb") as input_wav:
@@ -210,6 +228,7 @@ def capture_loop():
     last_led_update = 0.0
     try:
         io.recording()
+        release_capture_device()
         process = subprocess.Popen(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", str(SAMPLE_RATE),
                                     "-c", str(CHANNELS), "-t", "raw"], stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, bufsize=0)
