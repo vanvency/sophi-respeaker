@@ -21,13 +21,22 @@ DEVICE = "hw:CARD=seeed8micvoicec,DEV=0"
 app = Flask(__name__)
 state = {"running": False, "lines": [], "error": None,
          "asr": {"endpoint": ASR_URL, "queue": 0, "in_flight": None,
-                 "completed": 0, "failed": 0, "last": None}}
+                 "completed": 0, "failed": 0, "last": None},
+         "events": []}
 lock = threading.Lock()
 io = None
 asr_queue = queue.Queue()
 
 def utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def event(clip, stage, status="ok", **details):
+    """Append a bounded, browser-visible trace event for one audio clip."""
+    entry = {"time": utcnow(), "clip": clip, "stage": stage, "status": status, **details}
+    with lock:
+        state["events"].append(entry)
+        state["events"] = state["events"][-100:]
+    return entry
 
 def transcribe(wav):
     command = ["curl", "--noproxy", "*", "--fail", "--silent", "--show-error",
@@ -38,29 +47,35 @@ def transcribe(wav):
 def asr_worker():
     """Consume prepared clips without ever blocking the microphone loop."""
     while True:
-        raw_wav, asr_wav, queued_at = asr_queue.get()
+        raw_wav, asr_wav, queued_at, pipeline_started = asr_queue.get()
+        clip = raw_wav.name
         started = time.monotonic()
         with lock:
             state["asr"]["queue"] = asr_queue.qsize()
-            state["asr"]["in_flight"] = {"file": raw_wav.name, "started": utcnow()}
+            state["asr"]["in_flight"] = {"file": clip, "started": utcnow()}
+        event(clip, "asr_request", "started", queue_wait_s=round(started-queued_at, 3), endpoint=ASR_URL)
         try:
             io.transcribing()
             text = transcribe(asr_wav)
             elapsed = round(time.monotonic() - started, 3)
             report = {"file": raw_wav.name, "status": "ok", "finished": utcnow(),
                       "latency_s": elapsed, "audio_s": CHUNK_SECONDS,
-                      "rtf": round(elapsed / CHUNK_SECONDS, 3), "text": text}
+                      "rtf": round(elapsed / CHUNK_SECONDS, 3),
+                      "end_to_end_s": round(time.monotonic() - pipeline_started, 3), "text": text}
             with lock:
                 state["asr"]["completed"] += 1
                 state["asr"]["last"] = report
                 if text:
                     state["lines"].append({"time": report["finished"], "text": text, "file": raw_wav.name})
+            event(clip, "asr_request", "ok", latency_s=elapsed, rtf=report["rtf"],
+                  end_to_end_s=report["end_to_end_s"], chars=len(text))
         except Exception as exc:
             with lock:
                 state["asr"]["failed"] += 1
                 state["error"] = str(exc)
                 state["asr"]["last"] = {"file": raw_wav.name, "status": "failed", "finished": utcnow(), "error": str(exc)}
             io.error()
+            event(clip, "asr_request", "failed", end_to_end_s=round(time.monotonic() - pipeline_started, 3), error=str(exc))
         finally:
             with lock:
                 state["asr"]["in_flight"] = None
@@ -85,19 +100,29 @@ def capture_loop():
                 return
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         wav = RECORDINGS / f"chunk-{stamp}.wav"
+        clip = wav.name
         try:
             io.recording()
+            capture_started = time.monotonic()
+            event(clip, "capture", "started", device=DEVICE, channels=8, sample_rate=48000)
             subprocess.run(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", "48000", "-c", "8",
                             "-d", str(CHUNK_SECONDS), "-t", "wav", str(wav)],
                            text=True, capture_output=True, timeout=CHUNK_SECONDS + 15, check=True)
+            event(clip, "capture", "ok", duration_s=round(time.monotonic()-capture_started, 3), bytes=wav.stat().st_size)
+            convert_started = time.monotonic()
+            event(clip, "audio_prepare", "started", target="mono/16kHz/s16")
             asr_wav = make_asr_audio(wav)
-            asr_queue.put((wav, asr_wav, time.monotonic()))
+            event(clip, "audio_prepare", "ok", duration_s=round(time.monotonic()-convert_started, 3), bytes=asr_wav.stat().st_size)
+            queued_at = time.monotonic()
+            asr_queue.put((wav, asr_wav, queued_at, capture_started))
             with lock:
                 state["asr"]["queue"] = asr_queue.qsize()
+            event(clip, "asr_queue", "queued", depth=asr_queue.qsize())
         except Exception as exc:
             with lock:
                 state["error"] = str(exc)
             io.error()
+            event(clip, "pipeline", "failed", error=str(exc))
             time.sleep(2)
         else:
             io.recording()
