@@ -29,6 +29,16 @@ def transcribe(wav):
     result = subprocess.run(command, text=True, capture_output=True, timeout=120, check=True)
     return json.loads(result.stdout).get("text", "").strip()
 
+def make_asr_audio(raw_wav):
+    """Create a Whisper-friendly mono file from microphone channels 1–6 only."""
+    output = raw_wav.with_name(raw_wav.stem + "-asr.wav")
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_wav),
+        "-filter_complex", "pan=mono|c0=0.1667*c0+0.1667*c1+0.1667*c2+0.1667*c3+0.1667*c4+0.1667*c5",
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(output),
+    ], text=True, capture_output=True, timeout=30, check=True)
+    return output
+
 def capture_loop():
     RECORDINGS.mkdir(parents=True, exist_ok=True)
     while True:
@@ -41,7 +51,8 @@ def capture_loop():
             subprocess.run(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", "48000", "-c", "8",
                             "-d", str(CHUNK_SECONDS), "-t", "wav", str(wav)],
                            text=True, capture_output=True, timeout=CHUNK_SECONDS + 15, check=True)
-            text = transcribe(wav)
+            asr_wav = make_asr_audio(wav)
+            text = transcribe(asr_wav)
             if text:
                 with lock:
                     state["lines"].append({"time": utcnow(), "text": text, "file": wav.name})
