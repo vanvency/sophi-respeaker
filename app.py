@@ -2,6 +2,7 @@
 """LAN dashboard for chunked ReSpeaker capture and local Whisper ASR."""
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -18,9 +19,12 @@ CHUNK_SECONDS = int(os.environ.get("CHUNK_SECONDS", "5"))
 DEVICE = "hw:CARD=seeed8micvoicec,DEV=0"
 
 app = Flask(__name__)
-state = {"running": False, "lines": [], "error": None}
+state = {"running": False, "lines": [], "error": None,
+         "asr": {"endpoint": ASR_URL, "queue": 0, "in_flight": None,
+                 "completed": 0, "failed": 0, "last": None}}
 lock = threading.Lock()
 io = None
+asr_queue = queue.Queue()
 
 def utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -30,6 +34,38 @@ def transcribe(wav):
                ASR_URL, "-F", f"file=@{wav}", "-F", "model=atom"]
     result = subprocess.run(command, text=True, capture_output=True, timeout=120, check=True)
     return json.loads(result.stdout).get("text", "").strip()
+
+def asr_worker():
+    """Consume prepared clips without ever blocking the microphone loop."""
+    while True:
+        raw_wav, asr_wav, queued_at = asr_queue.get()
+        started = time.monotonic()
+        with lock:
+            state["asr"]["queue"] = asr_queue.qsize()
+            state["asr"]["in_flight"] = {"file": raw_wav.name, "started": utcnow()}
+        try:
+            io.transcribing()
+            text = transcribe(asr_wav)
+            elapsed = round(time.monotonic() - started, 3)
+            report = {"file": raw_wav.name, "status": "ok", "finished": utcnow(),
+                      "latency_s": elapsed, "audio_s": CHUNK_SECONDS,
+                      "rtf": round(elapsed / CHUNK_SECONDS, 3), "text": text}
+            with lock:
+                state["asr"]["completed"] += 1
+                state["asr"]["last"] = report
+                if text:
+                    state["lines"].append({"time": report["finished"], "text": text, "file": raw_wav.name})
+        except Exception as exc:
+            with lock:
+                state["asr"]["failed"] += 1
+                state["error"] = str(exc)
+                state["asr"]["last"] = {"file": raw_wav.name, "status": "failed", "finished": utcnow(), "error": str(exc)}
+            io.error()
+        finally:
+            with lock:
+                state["asr"]["in_flight"] = None
+                state["asr"]["queue"] = asr_queue.qsize()
+            asr_queue.task_done()
 
 def make_asr_audio(raw_wav):
     """Create a Whisper-friendly mono file from microphone channels 1–6 only."""
@@ -54,12 +90,10 @@ def capture_loop():
             subprocess.run(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", "48000", "-c", "8",
                             "-d", str(CHUNK_SECONDS), "-t", "wav", str(wav)],
                            text=True, capture_output=True, timeout=CHUNK_SECONDS + 15, check=True)
-            io.transcribing()
             asr_wav = make_asr_audio(wav)
-            text = transcribe(asr_wav)
-            if text:
-                with lock:
-                    state["lines"].append({"time": utcnow(), "text": text, "file": wav.name})
+            asr_queue.put((wav, asr_wav, time.monotonic()))
+            with lock:
+                state["asr"]["queue"] = asr_queue.qsize()
         except Exception as exc:
             with lock:
                 state["error"] = str(exc)
@@ -109,4 +143,5 @@ def stop():
 if __name__ == "__main__":
     io = ReSpeakerIO(toggle_from_button)
     io.standby()
+    threading.Thread(target=asr_worker, daemon=True, name="asr-worker").start()
     app.run(host="0.0.0.0", port=8080, threaded=True)
