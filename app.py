@@ -20,6 +20,10 @@ RECORDINGS = ROOT / "recordings"
 ASR_URL = os.environ.get("ASR_URL", "http://172.17.120.11:32184/v1/audio/transcriptions")
 CHUNK_SECONDS = int(os.environ.get("CHUNK_SECONDS", "5"))
 DEVICE = "hw:CARD=seeed8micvoicec,DEV=0"
+SAMPLE_RATE = 48000
+CHANNELS = 8
+SAMPLE_WIDTH = 4
+LIVE_WINDOW_SECONDS = 0.25
 
 app = Flask(__name__)
 state = {"running": False, "lines": [], "error": None,
@@ -27,10 +31,14 @@ state = {"running": False, "lines": [], "error": None,
                  "completed": 0, "failed": 0, "last": None},
          "direction": {"available": False, "label": "WAITING", "degree": 0,
                        "confidence": 0.0, "source": "energy_estimate", "uncertain": True},
+         "live": {"updated": None, "levels": [0.0] * 6,
+                  "direction": {"available": False, "label": "WAITING", "degree": 0,
+                                "confidence": 0.0, "source": "energy_estimate", "uncertain": True}},
          "events": []}
 lock = threading.Lock()
 io = None
 asr_queue = queue.Queue()
+prepare_queue = queue.Queue()
 
 DIRECTION_LABELS = ("N", "NE", "SE", "S", "SW", "NW")
 
@@ -46,6 +54,21 @@ def estimate_direction(energies):
     return {"available": True, "degree": index * 60, "label": DIRECTION_LABELS[index],
             "confidence": confidence, "uncertain": confidence < 0.10,
             "source": "energy_estimate"}
+
+
+def live_audio_snapshot(pcm, channels=8):
+    """Calculate six normalized levels and a direction from raw S32_LE PCM."""
+    samples = array("i")
+    samples.frombytes(pcm)
+    energies = []
+    for channel in range(6):
+        values = samples[channel::channels]
+        energies.append(math.sqrt(sum(value * value for value in values) / len(values)) if values else 0.0)
+    peak = max(energies)
+    direction = estimate_direction(energies)
+    levels = [round(value / peak, 3) if peak else 0.0 for value in energies]
+    direction["levels"] = levels
+    return {"levels": levels, "direction": direction}
 
 
 def wav_direction(wav_path):
@@ -130,6 +153,29 @@ def asr_worker():
                 state["asr"]["queue"] = asr_queue.qsize()
             asr_queue.task_done()
 
+
+def prepare_worker():
+    """Convert complete PCM windows while the capture stream continues uninterrupted."""
+    while True:
+        raw_wav, pipeline_started, direction = prepare_queue.get()
+        clip = raw_wav.name
+        try:
+            convert_started = time.monotonic()
+            event(clip, "audio_prepare", "started", target="mono/16kHz/s16")
+            asr_wav = make_asr_audio(raw_wav)
+            event(clip, "audio_prepare", "ok", duration_s=round(time.monotonic()-convert_started, 3), bytes=asr_wav.stat().st_size)
+            queued_at = time.monotonic()
+            asr_queue.put((raw_wav, asr_wav, queued_at, pipeline_started, direction))
+            with lock:
+                state["asr"]["queue"] = asr_queue.qsize()
+            event(clip, "asr_queue", "queued", depth=asr_queue.qsize())
+        except Exception as exc:
+            with lock:
+                state["error"] = str(exc)
+            event(clip, "audio_prepare", "failed", error=str(exc))
+        finally:
+            prepare_queue.task_done()
+
 def make_asr_audio(raw_wav):
     """Create a Whisper-friendly mono file from microphone channels 1–6 only."""
     output = raw_wav.with_name(raw_wav.stem + "-asr.wav")
@@ -140,45 +186,77 @@ def make_asr_audio(raw_wav):
     ], text=True, capture_output=True, timeout=30, check=True)
     return output
 
+def write_pcm_wav(wav_path, pcm):
+    with wave.open(str(wav_path), "wb") as output_wav:
+        output_wav.setnchannels(CHANNELS)
+        output_wav.setsampwidth(SAMPLE_WIDTH)
+        output_wav.setframerate(SAMPLE_RATE)
+        output_wav.writeframes(pcm)
+
+
 def capture_loop():
+    """Read one continuous raw PCM stream for live meters and fixed ASR windows."""
     RECORDINGS.mkdir(parents=True, exist_ok=True)
-    while True:
+    frame_bytes = CHANNELS * SAMPLE_WIDTH
+    chunk_bytes = SAMPLE_RATE * frame_bytes * CHUNK_SECONDS
+    live_bytes = int(SAMPLE_RATE * frame_bytes * LIVE_WINDOW_SECONDS)
+    read_bytes = int(SAMPLE_RATE * frame_bytes * 0.10)
+    pending, live_pcm = bytearray(), bytearray()
+    capture_started = time.monotonic()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    clip = f"chunk-{stamp}.wav"
+    event(clip, "capture", "started", device=DEVICE, channels=CHANNELS, sample_rate=SAMPLE_RATE)
+    process = None
+    last_led_update = 0.0
+    try:
+        io.recording()
+        process = subprocess.Popen(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", str(SAMPLE_RATE),
+                                    "-c", str(CHANNELS), "-t", "raw"], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, bufsize=0)
+        while True:
+            with lock:
+                running = state["running"]
+            if not running:
+                break
+            pcm = process.stdout.read(read_bytes)
+            if not pcm:
+                error = process.stderr.read().decode(errors="replace").strip() or "arecord stream ended"
+                raise RuntimeError(error)
+            pending.extend(pcm)
+            live_pcm.extend(pcm)
+            if len(live_pcm) >= live_bytes:
+                live_pcm = live_pcm[-live_bytes:]
+                snapshot = live_audio_snapshot(live_pcm)
+                direction = snapshot["direction"]
+                with lock:
+                    state["live"] = {"updated": utcnow(), **snapshot}
+                    state["direction"] = direction
+                if time.monotonic() - last_led_update >= 2:
+                    show_direction(direction)
+                    last_led_update = time.monotonic()
+            while len(pending) >= chunk_bytes:
+                chunk = bytes(pending[:chunk_bytes])
+                del pending[:chunk_bytes]
+                wav = RECORDINGS / clip
+                write_pcm_wav(wav, chunk)
+                with lock:
+                    direction = state["live"]["direction"]
+                event(clip, "capture", "ok", duration_s=round(time.monotonic()-capture_started, 3),
+                      bytes=wav.stat().st_size, direction=direction)
+                prepare_queue.put((wav, capture_started, direction))
+                capture_started = time.monotonic()
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                clip = f"chunk-{stamp}.wav"
+                event(clip, "capture", "started", device=DEVICE, channels=CHANNELS, sample_rate=SAMPLE_RATE)
+    except Exception as exc:
         with lock:
-            if not state["running"]:
-                return
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        wav = RECORDINGS / f"chunk-{stamp}.wav"
-        clip = wav.name
-        try:
-            io.recording()
-            capture_started = time.monotonic()
-            event(clip, "capture", "started", device=DEVICE, channels=8, sample_rate=48000)
-            subprocess.run(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", "48000", "-c", "8",
-                            "-d", str(CHUNK_SECONDS), "-t", "wav", str(wav)],
-                           text=True, capture_output=True, timeout=CHUNK_SECONDS + 15, check=True)
-            direction = wav_direction(wav)
-            with lock:
-                state["direction"] = direction
-            show_direction(direction)
-            event(clip, "capture", "ok", duration_s=round(time.monotonic()-capture_started, 3),
-                  bytes=wav.stat().st_size, direction=direction)
-            convert_started = time.monotonic()
-            event(clip, "audio_prepare", "started", target="mono/16kHz/s16")
-            asr_wav = make_asr_audio(wav)
-            event(clip, "audio_prepare", "ok", duration_s=round(time.monotonic()-convert_started, 3), bytes=asr_wav.stat().st_size)
-            queued_at = time.monotonic()
-            asr_queue.put((wav, asr_wav, queued_at, capture_started, direction))
-            with lock:
-                state["asr"]["queue"] = asr_queue.qsize()
-            event(clip, "asr_queue", "queued", depth=asr_queue.qsize())
-        except Exception as exc:
-            with lock:
-                state["error"] = str(exc)
-            io.error()
-            event(clip, "pipeline", "failed", error=str(exc))
-            time.sleep(2)
-        else:
-            io.recording()
+            state["error"] = str(exc)
+        io.error()
+        event(clip, "pipeline", "failed", error=str(exc))
+    finally:
+        if process:
+            process.terminate()
+            process.wait(timeout=5)
 
 def start_listening():
     with lock:
@@ -221,5 +299,6 @@ def stop():
 if __name__ == "__main__":
     io = ReSpeakerIO(toggle_from_button)
     io.standby()
+    threading.Thread(target=prepare_worker, daemon=True, name="audio-prepare-worker").start()
     threading.Thread(target=asr_worker, daemon=True, name="asr-worker").start()
     app.run(host="0.0.0.0", port=8080, threaded=True)
