@@ -1,7 +1,7 @@
 import unittest
 from array import array
 
-from app import live_audio_snapshot, pulse_capture_sources
+from app import arecord_command, live_audio_snapshot, pulse_capture_sources
 
 
 class LiveAudioSnapshotTests(unittest.TestCase):
@@ -27,6 +27,13 @@ class LiveAudioSnapshotTests(unittest.TestCase):
         sources = "0\talsa_output.platform-bcm2835_audio.analog-stereo.monitor\n2\talsa_input.platform-soc_sound.multichannel-input\n"
 
         self.assertEqual(pulse_capture_sources(sources), ["2"])
+
+    def test_capture_command_requests_low_latency_alsa_period(self):
+        command = arecord_command()
+
+        self.assertIn("--period-time=50000", command)
+        self.assertIn("--buffer-time=250000", command)
+        self.assertEqual(command[-1], "raw")
 
 
 if __name__ == "__main__":

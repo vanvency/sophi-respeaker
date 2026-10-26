@@ -89,6 +89,12 @@ def release_capture_device():
         pass
 
 
+def arecord_command():
+    """Return the low-latency raw capture command for the ReSpeaker ALSA device."""
+    return ["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", str(SAMPLE_RATE),
+            "-c", str(CHANNELS), "--period-time=50000", "--buffer-time=250000", "-t", "raw"]
+
+
 def wav_direction(wav_path):
     """Estimate direction from decimated RMS samples of channels 1–6 in an S32 WAV."""
     with wave.open(str(wav_path), "rb") as input_wav:
@@ -229,9 +235,7 @@ def capture_loop():
     try:
         io.recording()
         release_capture_device()
-        process = subprocess.Popen(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", str(SAMPLE_RATE),
-                                    "-c", str(CHANNELS), "-t", "raw"], stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, bufsize=0)
+        process = subprocess.Popen(arecord_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         while True:
             with lock:
                 running = state["running"]
