@@ -20,7 +20,8 @@ class ReSpeakerIO:
         GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.add_event_detect(BUTTON_PIN, GPIO.FALLING, callback=self._pressed, bouncetime=250)
         self.spi = spidev.SpiDev()
-        self.spi.open(0, 0)
+        # The ReSpeaker APA102 ring is wired to SPI0 CE1, not CE0.
+        self.spi.open(0, 1)
         self.spi.max_speed_hz = 8_000_000
         self.off()
         atexit.register(self.close)
