@@ -1,6 +1,7 @@
 import unittest
 
-from app import estimate_direction
+import app
+from app import estimate_direction, show_direction
 
 
 class DirectionEstimateTests(unittest.TestCase):
@@ -17,6 +18,38 @@ class DirectionEstimateTests(unittest.TestCase):
 
         self.assertTrue(result["uncertain"])
         self.assertEqual(result["confidence"], 0.0)
+
+    def test_high_confidence_direction_is_sent_to_led_ring(self):
+        calls = []
+
+        class FakeIO:
+            def direction(self, degree):
+                calls.append(degree)
+
+        previous_io = app.io
+        app.io = FakeIO()
+        try:
+            show_direction({"available": True, "uncertain": False, "degree": 180})
+        finally:
+            app.io = previous_io
+
+        self.assertEqual(calls, [180])
+
+    def test_uncertain_direction_is_not_sent_to_led_ring(self):
+        calls = []
+
+        class FakeIO:
+            def direction(self, degree):
+                calls.append(degree)
+
+        previous_io = app.io
+        app.io = FakeIO()
+        try:
+            show_direction({"available": True, "uncertain": True, "degree": 180})
+        finally:
+            app.io = previous_io
+
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

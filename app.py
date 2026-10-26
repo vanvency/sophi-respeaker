@@ -67,6 +67,13 @@ def wav_direction(wav_path):
     direction["levels"] = [round(value / max(energies), 3) if max(energies) else 0 for value in energies]
     return direction
 
+
+def show_direction(direction):
+    """Show only a sufficiently distinct direction on the physical LED ring."""
+    if io and direction.get("available") and not direction.get("uncertain"):
+        io.direction(direction["degree"])
+
+
 def utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -152,6 +159,7 @@ def capture_loop():
             direction = wav_direction(wav)
             with lock:
                 state["direction"] = direction
+            show_direction(direction)
             event(clip, "capture", "ok", duration_s=round(time.monotonic()-capture_started, 3),
                   bytes=wav.stat().st_size, direction=direction)
             convert_started = time.monotonic()
