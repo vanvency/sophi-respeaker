@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template
+from respeaker_io import ReSpeakerIO
 
 ROOT = Path(__file__).resolve().parent
 RECORDINGS = ROOT / "recordings"
@@ -19,6 +20,7 @@ DEVICE = "hw:CARD=seeed8micvoicec,DEV=0"
 app = Flask(__name__)
 state = {"running": False, "lines": [], "error": None}
 lock = threading.Lock()
+io = None
 
 def utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -48,9 +50,11 @@ def capture_loop():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         wav = RECORDINGS / f"chunk-{stamp}.wav"
         try:
+            io.recording()
             subprocess.run(["arecord", "-D", DEVICE, "-f", "S32_LE", "-r", "48000", "-c", "8",
                             "-d", str(CHUNK_SECONDS), "-t", "wav", str(wav)],
                            text=True, capture_output=True, timeout=CHUNK_SECONDS + 15, check=True)
+            io.transcribing()
             asr_wav = make_asr_audio(wav)
             text = transcribe(asr_wav)
             if text:
@@ -59,7 +63,29 @@ def capture_loop():
         except Exception as exc:
             with lock:
                 state["error"] = str(exc)
+            io.error()
             time.sleep(2)
+        else:
+            io.recording()
+
+def start_listening():
+    with lock:
+        if state["running"]:
+            return False
+        state["running"], state["error"] = True, None
+        threading.Thread(target=capture_loop, daemon=True).start()
+    io.recording()
+    return True
+
+def stop_listening():
+    with lock:
+        state["running"] = False
+    io.standby()
+
+def toggle_from_button():
+    with lock:
+        running = state["running"]
+    stop_listening() if running else start_listening()
 
 @app.route("/", methods=["GET"])
 def index():
@@ -72,17 +98,15 @@ def get_state():
 
 @app.route("/api/start", methods=["POST"])
 def start():
-    with lock:
-        if not state["running"]:
-            state["running"], state["error"] = True, None
-            threading.Thread(target=capture_loop, daemon=True).start()
+    start_listening()
     return jsonify({"ok": True})
 
 @app.route("/api/stop", methods=["POST"])
 def stop():
-    with lock:
-        state["running"] = False
+    stop_listening()
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
+    io = ReSpeakerIO(toggle_from_button)
+    io.standby()
     app.run(host="0.0.0.0", port=8080, threaded=True)
