@@ -39,6 +39,8 @@ lock = threading.Lock()
 io = None
 asr_queue = queue.Queue()
 prepare_queue = queue.Queue()
+capture_process = None
+capture_process_lock = threading.Lock()
 
 DIRECTION_LABELS = ("N", "NE", "SE", "S", "SW", "NW")
 
@@ -230,12 +232,15 @@ def capture_loop():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     clip = f"chunk-{stamp}.wav"
     event(clip, "capture", "started", device=DEVICE, channels=CHANNELS, sample_rate=SAMPLE_RATE)
+    global capture_process
     process = None
     last_led_update = 0.0
     try:
         io.recording()
         release_capture_device()
         process = subprocess.Popen(arecord_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        with capture_process_lock:
+            capture_process = process
         while True:
             with lock:
                 running = state["running"]
@@ -278,8 +283,16 @@ def capture_loop():
         event(clip, "pipeline", "failed", error=str(exc))
     finally:
         if process:
-            process.terminate()
-            process.wait(timeout=5)
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        with capture_process_lock:
+            if capture_process is process:
+                capture_process = None
 
 def start_listening():
     with lock:
@@ -293,6 +306,10 @@ def start_listening():
 def stop_listening():
     with lock:
         state["running"] = False
+    with capture_process_lock:
+        process = capture_process
+    if process and process.poll() is None:
+        process.terminate()
     io.standby()
 
 def toggle_from_button():
