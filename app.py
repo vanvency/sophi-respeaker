@@ -23,7 +23,7 @@ DEVICE = "hw:CARD=seeed8micvoicec,DEV=0"
 SAMPLE_RATE = 48000
 CHANNELS = 8
 SAMPLE_WIDTH = 4
-LIVE_WINDOW_SECONDS = 0.25
+LIVE_WINDOW_SECONDS = 0.10
 
 app = Flask(__name__)
 state = {"running": False, "lines": [], "error": None,
@@ -118,9 +118,9 @@ def wav_direction(wav_path):
 
 
 def show_direction(direction):
-    """Show only a sufficiently distinct direction on the physical LED ring."""
-    if io and direction.get("available") and not direction.get("uncertain"):
-        io.direction(direction["degree"])
+    """Render every live direction update on the physical LED ring."""
+    if io and direction.get("available"):
+        io.direction(direction["degree"], direction.get("uncertain", True))
 
 
 def utcnow():
@@ -241,7 +241,6 @@ def capture_loop():
     event(clip, "capture", "started", device=DEVICE, channels=CHANNELS, sample_rate=SAMPLE_RATE)
     global capture_process
     process = None
-    last_led_update = 0.0
     try:
         io.recording()
         release_capture_device()
@@ -266,9 +265,7 @@ def capture_loop():
                 with lock:
                     state["live"] = {"updated": utcnow(), **snapshot}
                     state["direction"] = direction
-                if time.monotonic() - last_led_update >= 2:
-                    show_direction(direction)
-                    last_led_update = time.monotonic()
+                show_direction(direction)
             while len(pending) >= chunk_bytes:
                 chunk = bytes(pending[:chunk_bytes])
                 del pending[:chunk_bytes]

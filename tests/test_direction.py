@@ -1,7 +1,7 @@
 import unittest
 
 import app
-from app import estimate_direction, show_direction
+from app import LIVE_WINDOW_SECONDS, estimate_direction, show_direction
 
 
 class DirectionEstimateTests(unittest.TestCase):
@@ -23,8 +23,8 @@ class DirectionEstimateTests(unittest.TestCase):
         calls = []
 
         class FakeIO:
-            def direction(self, degree):
-                calls.append(degree)
+            def direction(self, degree, uncertain):
+                calls.append((degree, uncertain))
 
         previous_io = app.io
         app.io = FakeIO()
@@ -33,14 +33,14 @@ class DirectionEstimateTests(unittest.TestCase):
         finally:
             app.io = previous_io
 
-        self.assertEqual(calls, [180])
+        self.assertEqual(calls, [(180, False)])
 
-    def test_uncertain_direction_is_not_sent_to_led_ring(self):
+    def test_uncertain_direction_is_sent_to_led_ring_as_dim_red(self):
         calls = []
 
         class FakeIO:
-            def direction(self, degree):
-                calls.append(degree)
+            def direction(self, degree, uncertain):
+                calls.append((degree, uncertain))
 
         previous_io = app.io
         app.io = FakeIO()
@@ -49,7 +49,10 @@ class DirectionEstimateTests(unittest.TestCase):
         finally:
             app.io = previous_io
 
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [(180, True)])
+
+    def test_live_analysis_window_is_100_milliseconds(self):
+        self.assertEqual(LIVE_WINDOW_SECONDS, 0.10)
 
 
 if __name__ == "__main__":

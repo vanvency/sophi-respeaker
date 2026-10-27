@@ -11,6 +11,18 @@ BUTTON_PIN = 26
 LED_POWER_PIN = 5
 LED_COUNT = 12
 
+
+def direction_colors(degree, uncertain):
+    """Return the red directional pattern for the 12-LED ReSpeaker ring."""
+    if uncertain:
+        return [(20, 0, 0)] * LED_COUNT
+    start = int((degree % 360) / 30) % LED_COUNT
+    colors = [(0, 0, 0)] * LED_COUNT
+    colors[start] = (150, 0, 0)
+    colors[(start + 1) % LED_COUNT] = (150, 0, 0)
+    return colors
+
+
 class ReSpeakerIO:
     def __init__(self, on_button):
         self.on_button = on_button
@@ -60,18 +72,8 @@ class ReSpeakerIO:
     def recording(self): self._set_status((96, 0, 0), 10)
     def transcribing(self): self._set_status((90, 40, 0), 8)
     def error(self): self._set_status((96, 0, 40), 10, force=True)
-    def direction(self, degree, hold_seconds=2):
-        center = round((degree % 360) / 30) % LED_COUNT
-        colors = []
-        for index in range(LED_COUNT):
-            distance = min((index-center) % LED_COUNT, (center-index) % LED_COUNT)
-            colors.append((0, max(0, 80 - distance * 35), max(0, 110 - distance * 50)))
-        with self.lock:
-            self.direction_until = time.monotonic() + hold_seconds
-            self._pixels_locked(colors, 8)
-        timer = threading.Timer(hold_seconds, self._restore_status)
-        timer.daemon = True
-        timer.start()
+    def direction(self, degree, uncertain):
+        self.pixels(direction_colors(degree, uncertain), 3 if uncertain else 12)
 
     def close(self):
         try: self.off(); self.spi.close(); GPIO.cleanup()
