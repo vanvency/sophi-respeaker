@@ -24,6 +24,9 @@ SAMPLE_RATE = 48000
 CHANNELS = 8
 SAMPLE_WIDTH = 4
 LIVE_WINDOW_SECONDS = 0.10
+PCM_FULL_SCALE = 2 ** 31
+DIRECTION_MIN_DBFS = float(os.environ.get("DIRECTION_MIN_DBFS", "-50"))
+DIRECTION_MIN_RMS = PCM_FULL_SCALE * (10 ** (DIRECTION_MIN_DBFS / 20))
 
 app = Flask(__name__)
 state = {"running": False, "lines": [], "error": None,
@@ -58,6 +61,20 @@ def estimate_direction(energies):
             "source": "energy_estimate"}
 
 
+def direction_with_sound_gate(energies):
+    """Mark sub-speech-floor input as directionally unknown, regardless of channel bias."""
+    direction = estimate_direction(energies)
+    peak = max(energies)
+    level_dbfs = 20 * math.log10(peak / PCM_FULL_SCALE) if peak else float("-inf")
+    direction["level_dbfs"] = round(level_dbfs, 1) if peak else None
+    if peak < DIRECTION_MIN_RMS:
+        direction["uncertain"] = True
+        direction["reason"] = "silence"
+    else:
+        direction["reason"] = "ambiguous" if direction["uncertain"] else "directional"
+    return direction
+
+
 def live_audio_snapshot(pcm, channels=8):
     """Calculate six normalized levels and a direction from raw S32_LE PCM."""
     samples = array("i")
@@ -67,7 +84,7 @@ def live_audio_snapshot(pcm, channels=8):
         values = samples[channel::channels]
         energies.append(math.sqrt(sum(value * value for value in values) / len(values)) if values else 0.0)
     peak = max(energies)
-    direction = estimate_direction(energies)
+    direction = direction_with_sound_gate(energies)
     levels = [round(value / peak, 3) if peak else 0.0 for value in energies]
     direction["levels"] = levels
     return {"levels": levels, "direction": direction}
@@ -112,7 +129,7 @@ def wav_direction(wav_path):
         if not values:
             raise ValueError("captured WAV has no audio samples")
         energies.append(math.sqrt(sum(value * value for value in values) / len(values)))
-    direction = estimate_direction(energies)
+    direction = direction_with_sound_gate(energies)
     direction["levels"] = [round(value / max(energies), 3) if max(energies) else 0 for value in energies]
     return direction
 

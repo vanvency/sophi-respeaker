@@ -8,7 +8,8 @@ class LiveAudioSnapshotTests(unittest.TestCase):
     def test_reports_six_normalized_levels_and_direction(self):
         frames = array("i")
         for _ in range(40):
-            frames.extend([10, 20, 400, 30, 10, 20, 0, 0])
+            frames.extend([10_000_000, 20_000_000, 400_000_000, 30_000_000,
+                           10_000_000, 20_000_000, 0, 0])
 
         snapshot = live_audio_snapshot(frames.tobytes())
 
@@ -22,6 +23,17 @@ class LiveAudioSnapshotTests(unittest.TestCase):
 
         self.assertEqual(snapshot["levels"], [0.0] * 6)
         self.assertTrue(snapshot["direction"]["uncertain"])
+
+    def test_quiet_biased_noise_is_uncertain(self):
+        """Static channel imbalance below the speech floor must not point the ring."""
+        frames = array("i")
+        for _ in range(40):
+            frames.extend([2_400_000, 2_200_000, 2_000_000, 1_800_000, 8_000, 8_000, 0, 0])
+
+        snapshot = live_audio_snapshot(frames.tobytes())
+
+        self.assertTrue(snapshot["direction"]["uncertain"])
+        self.assertEqual(snapshot["direction"]["reason"], "silence")
 
     def test_finds_the_respeaker_pulse_source(self):
         sources = "0\talsa_output.platform-bcm2835_audio.analog-stereo.monitor\n2\talsa_input.platform-soc_sound.multichannel-input\n"
