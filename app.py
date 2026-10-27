@@ -203,14 +203,21 @@ def prepare_worker():
             prepare_queue.task_done()
 
 def make_asr_audio(raw_wav):
-    """Create a Whisper-friendly mono file from microphone channels 1–6 only."""
+    """Create a speech-focused mono file from the six ReSpeaker microphones."""
     output = raw_wav.with_name(raw_wav.stem + "-asr.wav")
     subprocess.run([
         "ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_wav),
-        "-filter_complex", "pan=mono|c0=0.1667*c0+0.1667*c1+0.1667*c2+0.1667*c3+0.1667*c4+0.1667*c5",
+        "-filter_complex", asr_audio_filter(),
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(output),
     ], text=True, capture_output=True, timeout=30, check=True)
     return output
+
+
+def asr_audio_filter():
+    """Mix the six microphones, retain speech frequencies, and suppress stationary noise."""
+    return ("pan=mono|c0=0.1667*c0+0.1667*c1+0.1667*c2+0.1667*c3+0.1667*c4+0.1667*c5,"
+            "highpass=f=90,lowpass=f=7600,afftdn=nr=18:nf=-45:tn=1:tr=1,"
+            "dynaudnorm=f=150:g=7:p=0.95")
 
 def write_pcm_wav(wav_path, pcm):
     with wave.open(str(wav_path), "wb") as output_wav:
